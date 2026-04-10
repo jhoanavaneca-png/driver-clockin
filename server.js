@@ -16,7 +16,7 @@ app.get("/favicon.ico", (req, res) => res.status(204).end());
 const recentScans = {};
 function isLocked(location) {
   const now = Date.now();
-  if (recentScans[location] && now - recentScans[location] < 10000) return true;
+  if (recentScans[location] && now - recentScans[location] < 60000) return true;
   recentScans[location] = now;
   return false;
 }
