@@ -127,8 +127,9 @@ app.get("/", async (req, res) => {
       requestBody: { values: [[m.timeStr]] },
     });
 
-    const redirectUrl = `/?location=${location}&confirmed=1&event=${encodeURIComponent(result.event)}&time=${encodeURIComponent(m.dateStr + "  ·  " + m.timeStr)}&trip=${result.trip}`;
-    return res.redirect(redirectUrl);
+    const confirmUrl = `/?location=${location}&confirmed=1&event=${encodeURIComponent(result.event)}&time=${encodeURIComponent(m.dateStr + "  ·  " + m.timeStr)}&trip=${result.trip}`;
+    // Use JS redirect with replaceState so back button skips the scan URL
+    return res.send(`<html><head><meta name="viewport" content="width=device-width,initial-scale=1"></head><body><script>history.replaceState(null,'','${confirmUrl}');window.location.replace('${confirmUrl}');<\/script></body></html>`);
 
   } catch (err) {
     console.error(err);
