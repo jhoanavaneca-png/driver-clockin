@@ -9,13 +9,15 @@ const DATA_START_ROW = 4;
 const MAX_TRIPS      = 5;
 // ────────────────────────────────────────────────────────────
 
-// Lock to prevent double-writes (browser sometimes sends 2 requests)
+// Block favicon requests (these cause a second hit on every page load)
+app.get("/favicon.ico", (req, res) => res.status(204).end());
+
+// Lock: prevent double-writes within 10 seconds per location
 const recentScans = {};
 function isLocked(location) {
-  const key = location;
   const now = Date.now();
-  if (recentScans[key] && now - recentScans[key] < 5000) return true;
-  recentScans[key] = now;
+  if (recentScans[location] && now - recentScans[location] < 10000) return true;
+  recentScans[location] = now;
   return false;
 }
 
@@ -55,9 +57,10 @@ app.get("/", async (req, res) => {
     return res.send(htmlPage("Error", "No location specified.", "#c0392b", ""));
   }
 
-  // Block duplicate requests within 5 seconds
+  // Block duplicate requests within 10 seconds
   if (isLocked(location)) {
-    return res.status(200).send(""); // silent empty response to the duplicate request
+    console.log("Duplicate request blocked for location:", location);
+    return res.status(200).send("<!DOCTYPE html><html><body></body></html>");
   }
 
   try {
