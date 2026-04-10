@@ -9,7 +9,6 @@ const DATA_START_ROW = 4;
 const MAX_TRIPS      = 5;
 // ────────────────────────────────────────────────────────────
 
-// Auth via service account
 function getAuth() {
   const credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS);
   return new google.auth.GoogleAuth({
@@ -18,15 +17,28 @@ function getAuth() {
   });
 }
 
+function getMadridDate(now) {
+  const madrid = new Date(now.toLocaleString("en-US", { timeZone: "Europe/Madrid" }));
+  return {
+    date: madrid,
+    day: madrid.getDate(),
+    month: madrid.getMonth() + 1, // 1-based
+    year: madrid.getFullYear(),
+    timeStr: pad(madrid.getHours()) + ":" + pad(madrid.getMinutes()),
+    dateStr: madrid.getDate() + "/" + pad(madrid.getMonth() + 1) + "/" + madrid.getFullYear(),
+    // Key for comparison: "10/04/2026" style
+    key: madrid.getDate() + "/" + pad(madrid.getMonth() + 1) + "/" + madrid.getFullYear()
+  };
+}
+
 // ── Main route ───────────────────────────────────────────────
 app.get("/", async (req, res) => {
-  const location  = req.query.location;
-  const confirmed = req.query.confirmed;
+  const location    = req.query.location;
+  const confirmed   = req.query.confirmed;
   const loggedEvent = req.query.event;
   const loggedTime  = req.query.time;
   const loggedTrip  = req.query.trip;
 
-  // Already logged — just show confirmation (refresh-safe)
   if (confirmed === "1") {
     return res.send(htmlPage(loggedEvent, loggedTrip + "º Viaje  ·  " + loggedTime, getColor(loggedEvent), location));
   }
@@ -36,50 +48,73 @@ app.get("/", async (req, res) => {
   }
 
   try {
-    const auth    = getAuth();
-    const sheets  = google.sheets({ version: "v4", auth });
+    const auth   = getAuth();
+    const sheets = google.sheets({ version: "v4", auth });
 
-    // Get current sheet data
+    const totalCols = 1 + MAX_TRIPS * 4;
+    const endCol    = colLetter(totalCols);
+
     const response = await sheets.spreadsheets.values.get({
       spreadsheetId: SHEET_ID,
-      range: `${SHEET_NAME}!A${DATA_START_ROW}:${colLetter(1 + MAX_TRIPS * 4)}1000`,
+      range: `${SHEET_NAME}!A${DATA_START_ROW}:${endCol}1000`,
     });
 
-    const rows   = response.data.values || [];
-    const now    = new Date();
-    const madrid = new Date(now.toLocaleString("en-US", { timeZone: "Europe/Madrid" }));
-    const timeStr = pad(madrid.getHours()) + ":" + pad(madrid.getMinutes());
-    const dateStr = madrid.getDate() + "/" + pad(madrid.getMonth() + 1) + "/" + madrid.getFullYear();
-    const todayKey = madrid.getFullYear() + "-" + madrid.getMonth() + "-" + madrid.getDate();
+    const rows = response.data.values || [];
+    const m    = getMadridDate(new Date());
 
-    // Find today's row
+    // Find today's row by comparing the date string in column A
+    // Handles both text "10/04/2026" and date serial numbers
     let rowIndex = -1;
     for (let i = 0; i < rows.length; i++) {
       const cell = rows[i][0];
       if (!cell) continue;
-      const d = new Date(cell);
-      const dMadrid = new Date(d.toLocaleString("en-US", { timeZone: "Europe/Madrid" }));
-      const key = dMadrid.getFullYear() + "-" + dMadrid.getMonth() + "-" + dMadrid.getDate();
-      if (key === todayKey) { rowIndex = i; break; }
+
+      // Try matching as text first (e.g. "10/04/2026" or "10/4/2026")
+      const cellStr = String(cell).trim();
+      
+      // Parse d/M/yyyy or d/MM/yyyy
+      const parts = cellStr.split("/");
+      if (parts.length === 3) {
+        const d = parseInt(parts[0], 10);
+        const mo = parseInt(parts[1], 10);
+        const y = parseInt(parts[2], 10);
+        if (d === m.day && mo === m.month && y === m.year) {
+          rowIndex = i;
+          break;
+        }
+      }
+
+      // Try as a Date object (in case Google returns a serial)
+      const asDate = new Date(cell);
+      if (!isNaN(asDate)) {
+        const madridCell = new Date(asDate.toLocaleString("en-US", { timeZone: "Europe/Madrid" }));
+        if (
+          madridCell.getDate() === m.day &&
+          madridCell.getMonth() + 1 === m.month &&
+          madridCell.getFullYear() === m.year
+        ) {
+          rowIndex = i;
+          break;
+        }
+      }
     }
 
-    let sheetRow; // 1-based sheet row number
+    let sheetRow;
     if (rowIndex === -1) {
-      // Create new row for today
+      // No row for today — create one
       sheetRow = DATA_START_ROW + rows.length;
       await sheets.spreadsheets.values.update({
         spreadsheetId: SHEET_ID,
         range: `${SHEET_NAME}!A${sheetRow}`,
         valueInputOption: "USER_ENTERED",
-        requestBody: { values: [[dateStr]] },
+        requestBody: { values: [[m.dateStr]] },
       });
-      rows.push([dateStr]);
+      rows.push([m.dateStr]);
       rowIndex = rows.length - 1;
     } else {
       sheetRow = DATA_START_ROW + rowIndex;
     }
 
-    // Find next empty column
     const rowData = rows[rowIndex] || [];
     const result  = findNextColumn(rowData, location);
 
@@ -87,17 +122,15 @@ app.get("/", async (req, res) => {
       return res.send(htmlPage("Maximo alcanzado", "Todos los viajes del dia ya estan registrados.", "#e67e22", location));
     }
 
-    // Write time to the correct cell
     const cellRef = `${SHEET_NAME}!${colLetter(result.col)}${sheetRow}`;
     await sheets.spreadsheets.values.update({
       spreadsheetId: SHEET_ID,
       range: cellRef,
       valueInputOption: "USER_ENTERED",
-      requestBody: { values: [[timeStr]] },
+      requestBody: { values: [[m.timeStr]] },
     });
 
-    // Redirect to refresh-safe confirmation URL
-    const redirectUrl = `/?location=${location}&confirmed=1&event=${encodeURIComponent(result.event)}&time=${encodeURIComponent(dateStr + "  ·  " + timeStr)}&trip=${result.trip}`;
+    const redirectUrl = `/?location=${location}&confirmed=1&event=${encodeURIComponent(result.event)}&time=${encodeURIComponent(m.dateStr + "  ·  " + m.timeStr)}&trip=${result.trip}`;
     return res.redirect(redirectUrl);
 
   } catch (err) {
@@ -112,11 +145,11 @@ function findNextColumn(rowData, location) {
     if (location === "lls") {
       const li = 4*n-3, si = 4*n-2, lc = 4*n-2, sc = 4*n-1;
       if (!rowData[li]) return { col: lc, event: "LLEGADA LLS",  trip: n };
-      if (rowData[li] && !rowData[si]) return { col: sc, event: "SALIDA LLS",   trip: n };
+      if (rowData[li] && !rowData[si]) return { col: sc, event: "SALIDA LLS", trip: n };
     } else {
       const li = 4*n-1, si = 4*n, lc = 4*n, sc = 4*n+1;
       if (!rowData[li]) return { col: lc, event: "LLEGADA USERA", trip: n };
-      if (rowData[li] && !rowData[si]) return { col: sc, event: "SALIDA USERA",  trip: n };
+      if (rowData[li] && !rowData[si]) return { col: sc, event: "SALIDA USERA", trip: n };
     }
   }
   return null;
