@@ -9,6 +9,16 @@ const DATA_START_ROW = 4;
 const MAX_TRIPS      = 5;
 // ────────────────────────────────────────────────────────────
 
+// Lock to prevent double-writes (browser sometimes sends 2 requests)
+const recentScans = {};
+function isLocked(location) {
+  const key = location;
+  const now = Date.now();
+  if (recentScans[key] && now - recentScans[key] < 5000) return true;
+  recentScans[key] = now;
+  return false;
+}
+
 function getAuth() {
   const credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS);
   return new google.auth.GoogleAuth({
@@ -20,14 +30,11 @@ function getAuth() {
 function getMadridDate(now) {
   const madrid = new Date(now.toLocaleString("en-US", { timeZone: "Europe/Madrid" }));
   return {
-    date: madrid,
     day: madrid.getDate(),
-    month: madrid.getMonth() + 1, // 1-based
+    month: madrid.getMonth() + 1,
     year: madrid.getFullYear(),
     timeStr: pad(madrid.getHours()) + ":" + pad(madrid.getMinutes()),
     dateStr: madrid.getDate() + "/" + pad(madrid.getMonth() + 1) + "/" + madrid.getFullYear(),
-    // Key for comparison: "10/04/2026" style
-    key: madrid.getDate() + "/" + pad(madrid.getMonth() + 1) + "/" + madrid.getFullYear()
   };
 }
 
@@ -39,6 +46,7 @@ app.get("/", async (req, res) => {
   const loggedTime  = req.query.time;
   const loggedTrip  = req.query.trip;
 
+  // Already logged — just show confirmation (refresh-safe)
   if (confirmed === "1") {
     return res.send(htmlPage(loggedEvent, loggedTrip + "º Viaje  ·  " + loggedTime, getColor(loggedEvent), location));
   }
@@ -47,12 +55,15 @@ app.get("/", async (req, res) => {
     return res.send(htmlPage("Error", "No location specified.", "#c0392b", ""));
   }
 
+  // Block duplicate requests within 5 seconds
+  if (isLocked(location)) {
+    return res.status(200).send(""); // silent empty response to the duplicate request
+  }
+
   try {
     const auth   = getAuth();
     const sheets = google.sheets({ version: "v4", auth });
-
-    const totalCols = 1 + MAX_TRIPS * 4;
-    const endCol    = colLetter(totalCols);
+    const endCol = colLetter(1 + MAX_TRIPS * 4);
 
     const response = await sheets.spreadsheets.values.get({
       spreadsheetId: SHEET_ID,
@@ -62,46 +73,30 @@ app.get("/", async (req, res) => {
     const rows = response.data.values || [];
     const m    = getMadridDate(new Date());
 
-    // Find today's row by comparing the date string in column A
-    // Handles both text "10/04/2026" and date serial numbers
+    // Find today's row
     let rowIndex = -1;
     for (let i = 0; i < rows.length; i++) {
       const cell = rows[i][0];
       if (!cell) continue;
-
-      // Try matching as text first (e.g. "10/04/2026" or "10/4/2026")
       const cellStr = String(cell).trim();
-      
-      // Parse d/M/yyyy or d/MM/yyyy
       const parts = cellStr.split("/");
       if (parts.length === 3) {
         const d = parseInt(parts[0], 10);
         const mo = parseInt(parts[1], 10);
         const y = parseInt(parts[2], 10);
-        if (d === m.day && mo === m.month && y === m.year) {
-          rowIndex = i;
-          break;
-        }
+        if (d === m.day && mo === m.month && y === m.year) { rowIndex = i; break; }
       }
-
-      // Try as a Date object (in case Google returns a serial)
       const asDate = new Date(cell);
       if (!isNaN(asDate)) {
-        const madridCell = new Date(asDate.toLocaleString("en-US", { timeZone: "Europe/Madrid" }));
-        if (
-          madridCell.getDate() === m.day &&
-          madridCell.getMonth() + 1 === m.month &&
-          madridCell.getFullYear() === m.year
-        ) {
-          rowIndex = i;
-          break;
+        const mc = new Date(asDate.toLocaleString("en-US", { timeZone: "Europe/Madrid" }));
+        if (mc.getDate() === m.day && mc.getMonth()+1 === m.month && mc.getFullYear() === m.year) {
+          rowIndex = i; break;
         }
       }
     }
 
     let sheetRow;
     if (rowIndex === -1) {
-      // No row for today — create one
       sheetRow = DATA_START_ROW + rows.length;
       await sheets.spreadsheets.values.update({
         spreadsheetId: SHEET_ID,
@@ -122,10 +117,9 @@ app.get("/", async (req, res) => {
       return res.send(htmlPage("Maximo alcanzado", "Todos los viajes del dia ya estan registrados.", "#e67e22", location));
     }
 
-    const cellRef = `${SHEET_NAME}!${colLetter(result.col)}${sheetRow}`;
     await sheets.spreadsheets.values.update({
       spreadsheetId: SHEET_ID,
-      range: cellRef,
+      range: `${SHEET_NAME}!${colLetter(result.col)}${sheetRow}`,
       valueInputOption: "USER_ENTERED",
       requestBody: { values: [[m.timeStr]] },
     });
@@ -157,19 +151,12 @@ function findNextColumn(rowData, location) {
 
 function colLetter(n) {
   let s = "";
-  while (n > 0) {
-    const r = (n - 1) % 26;
-    s = String.fromCharCode(65 + r) + s;
-    n = Math.floor((n - 1) / 26);
-  }
+  while (n > 0) { const r = (n-1)%26; s = String.fromCharCode(65+r)+s; n = Math.floor((n-1)/26); }
   return s;
 }
 
 function pad(n) { return String(n).padStart(2, "0"); }
-
-function getColor(event) {
-  return (event && event.includes("LLEGADA")) ? "#27ae60" : "#e67e22";
-}
+function getColor(e) { return (e && e.includes("LLEGADA")) ? "#27ae60" : "#e67e22"; }
 
 function htmlPage(title, subtitle, color, location) {
   const bg  = location === "lls" ? "#1a2535" : "#1a3525";
